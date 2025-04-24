@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Face Recognition Attendance System</title>
+    <script src="https://unpkg.com/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        #video, #overlay {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .success-notification {
+            animation: fadeOut 3s forwards;
+        }
+        @keyframes fadeOut {
+            0% { opacity: 1; }
+            70% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+    </style>
+</head>
+<body class="bg-blue-100 min-h-screen">
+    <div class="container mx-auto px-4 py-8">
+        <div class="max-w-md mx-auto bg-white rounded-lg shadow-lg p-6">
+            <h1 class="text-2xl font-bold text-center mb-6">Employee Attendance System</h1>
+            
+            <!-- Camera View -->
+            <div class="relative mb-4 h-64">
+                <video id="video" class="w-full h-full bg-gray-200 rounded-lg" autoplay muted></video>
+                <canvas id="overlay" class="absolute top-0 left-0 w-full h-full"></canvas>
+                <div id="faceIndicator" class="hidden absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-green-500 text-6xl">
+                    <i class="bi bi-check-circle-fill"></i>
+                </div>
+                <div id="loadingIndicator" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 text-blue-500 text-xl">
+                    <i class="bi bi-hourglass-split animate-spin"></i> Loading model...
+                </div>
+            </div>
+
+            <!-- Status Message -->
+            <div id="status" class="mt-4 text-center font-semibold"></div>
+
+            <!-- Attendance Log -->
+            <div class="mt-6">
+                <h2 class="text-lg font-semibold mb-2">Today's Attendance</h2>
+                <div id="attendanceLog" class="bg-gray-50 rounded-lg p-4 max-h-48 overflow-y-auto">
+                    <!-- Attendance entries will be added here -->
+                    <p class="text-gray-500 text-center" id="noAttendance">No attendance records yet</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let video;
+        let canvas;
+        let isModelLoaded = false;
+        let recognizedFaces = new Set(); // To track already recognized faces
+        let isProcessing = false; // Flag to prevent multiple simultaneous detections
+        let lastDetectionTime = 0;
+        const COOLDOWN_PERIOD = 5000; // 5 seconds cooldown between detections
+
+        async function init() {
+            try {
+                // Load face detection models
+                await faceapi.nets.tinyFaceDetector.loadFromUri('https://justadudewhohacks.github.io/face-api.js/models');
+                await faceapi.nets.faceLandmark68Net.loadFromUri('https://justadudewhohacks.github.io/face-api.js/models');
+                await faceapi.nets.faceRecognitionNet.loadFromUri('https://justadudewhohacks.github.io/face-api.js/models');
+                
+                isModelLoaded = true;
+                document.getElementById('status').textContent = 'Model loaded. Starting camera...';
+                document.getElementById('loadingIndicator').classList.add('hidden');
+                
+                // Auto-start camera
+                startVideo();
+            } catch (error) {
+                document.getElementById('status').textContent = 'Error loading model: ' + error.message;
+            }
+        }
+
+        async function startVideo() {
+            video = document.getElementById('video');
+            canvas = document.getElementById('overlay');
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { 
+                        facingMode: 'user',
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 }
+                    } 
+                });
+                video.srcObject = stream;
+                document.getElementById('status').textContent = 'Position face in frame for auto-attendance';
+                
+                // Set canvas dimensions to match video after metadata is loaded
+                video.onloadedmetadata = () => {
+                    canvas.width = video.videoWidth;
+                    canvas.height = video.videoHeight;
+                    // Start face detection
+                    detectFaces();
+                };
+            } catch (err) {
+                document.getElementById('status').textContent = 'Error accessing camera: ' + err.message;
+            }
+        }
+
+        async function detectFaces() {
+            const displaySize = { width: video.clientWidth, height: video.clientHeight };
+            faceapi.matchDimensions(canvas, displaySize);
+
+            setInterval(async () => {
+                if (!isModelLoaded || isProcessing) return;
+                
+                try {
+                    const detections = await faceapi.detectAllFaces(video, 
+                        new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.6 }))
+                        .withFaceLandmarks();
+                    
+                    const resizedDetections = faceapi.resizeResults(detections, displaySize);
+                    const ctx = canvas.getContext('2d');
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    
+                    // Draw face detections
+                    faceapi.draw.drawDetections(canvas, resizedDetections);
+                    faceapi.draw.drawFaceLandmarks(canvas, resizedDetections);
+                    
+                    // If we detect a face and enough time has passed since last detection
+                    const now = Date.now();
+                    if (resizedDetections.length > 0 && now - lastDetectionTime > COOLDOWN_PERIOD) {
+                        isProcessing = true;
+                        await markAttendance();
+                        lastDetectionTime = now;
+                        isProcessing = false;
+                    }
+                } catch (error) {
+                    console.error('Error during face detection:', error);
+                }
+            }, 100);
+        }
+
+        async function markAttendance() {
+            const faceIndicator = document.getElementById('faceIndicator');
+            faceIndicator.classList.remove('hidden');
+            
+            // Show success indicator briefly
+            setTimeout(() => {
+                faceIndicator.classList.add('hidden');
+            }, 1500);
+            
+            const timestamp = new Date().toLocaleTimeString();
+            const date = new Date().toLocaleDateString();
+            const attendanceLog = document.getElementById('attendanceLog');
+            const noAttendance = document.getElementById('noAttendance');
+            
+            if (noAttendance) {
+                noAttendance.remove();
+            }
+            
+            const entry = document.createElement('div');
+            entry.className = 'mb-2 p-2 bg-white rounded shadow success-notification';
+            entry.innerHTML = `
+                <div class="flex justify-between items-center">
+                    <span class="font-medium">Employee Detected</span>
+                    <span class="text-sm text-gray-500">${timestamp}</span>
+                </div>
+                <div class="text-xs text-gray-400">${date}</div>
+            `;
+            attendanceLog.prepend(entry);
+            
+            document.getElementById('status').textContent = 'Attendance marked successfully!';
+            
+            // Reset status after a few seconds
+            setTimeout(() => {
+                document.getElementById('status').textContent = 'Position face in frame for auto-attendance';
+            }, 3000);
+        }
+
+        // Initialize face detection on page load
+        document.addEventListener('DOMContentLoaded', init);
+    </script>
+<script>document.body.addEventListener('wheel', e => { if (!e.ctrlKey) return; e.preventDefault(); return }, { passive: false })</script>
+	</body>
+</html>
